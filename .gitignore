@@ -1,4 +1,4 @@
 checkpoints
-custom/raw
+custom/data
 custom/3D-reconstruction-from-nuclei-rotation
 *.pyc

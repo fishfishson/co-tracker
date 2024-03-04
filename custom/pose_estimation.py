@@ -104,7 +104,7 @@ def geuss_radius_improved(tracks: np.ndarray, visibility: np.ndarray):
     valids = visibility.copy()
     centers = []
     radiis = []
-    for i in range(tracks.shape[0]):
+    for i in tqdm(range(tracks.shape[0])):
         track = tracks[i]
         valid = valids[i]
         center, radius = cv2.minEnclosingCircle(track[valid])
@@ -166,29 +166,33 @@ if __name__ == "__main__":
     parser.add_argument('--data_path', type=str)
     # geuss configs
     parser.add_argument('--radius_mode', type=str, default='improved', choices=['improved', 'original'])
+    parser.add_argument('--vis_radius', action='store_true', default=False)
+    parser.add_argument('--vis_depth', action='store_true', default=False)
+    parser.add_argument('--vis_points', action='store_true', default=False)
     args = parser.parse_args()
     
-    vis_radius = True
-    vis_depth = False
-    vis_points = False
-    vis_rotation = True
+    vis_radius = args.vis_radius
+    vis_depth = args.vis_depth
+    vis_points = args.vis_points
 
     images_path = os.path.join(args.data_path, 'images')
     images = sorted(glob(os.path.join(images_path, '*.jpg')))
 
     data = np.load(join(args.data_path, 'tracks.npz'))
-    tracks = data['tracks']
+    tracks = data['tracks'] 
     visibility = data['visibility']
+
+    print('Estimating radius')
     if args.radius_mode == 'improved':
+        radius_scale = 1.1
         centers, radiis, radiis_mean = geuss_radius_improved(tracks, visibility)
     elif args.radius_mode == 'original':
         radius_iters = 1
         radius_scale = 2.0
-        depth_scale = 1.8
-        centers, radiis, radiis_mean = guess_radius(tracks, visibility, max_iter=args.radius_iters)
-        radii = radiis_mean * depth_scale
+        centers, radiis, radiis_mean = guess_radius(tracks, visibility, max_iter=args.radius_iters, pre_fps=False)
     else:
         raise NotImplementedError
+    radii = radiis_mean * radius_scale
     if vis_radius:
         out_dir = join(args.data_path, 'radius')
         os.makedirs(out_dir, exist_ok=True)
@@ -200,11 +204,12 @@ if __name__ == "__main__":
         os.chdir(os.path.join(args.data_path))
         subprocess.call(f"ffmpeg -y -framerate 10 -pattern_type glob -i 'radius/*.jpg' -c:v h264 radius.mp4", shell=True)
         os.chdir(cwd)
-    exit()
+    
+    print('Estimating depth')
     depth = guess_depth(tracks, centers, radii)
     points = np.concatenate([tracks, depth[..., None]], axis=-1)
     Rs, ts = geuss_rotation(points, centers, visibility)
-    
+
     if vis_points:
         os.makedirs(join(args.data_path, 'points'), exist_ok=True)
         for i in range(len(points)):
@@ -287,27 +292,60 @@ if __name__ == "__main__":
         subprocess.call(f"ffmpeg -y -framerate 10 -pattern_type glob -i 'fuse/*.jpg' -c:v h264 fuse.mp4", shell=True)
         os.chdir(cwd)
 
+    print('Estimating ellipse')
+    ctrs = []
+    rads = []
     rots = []
+    euls = []
+    ET = EllipsoidTool()
     for i in tqdm(range(fuses.shape[0])):
-        ET = EllipsoidTool()
         ctr, rad, rot = ET.getMinVolEllipse(fuses[i], 0.01)
-        if vis_rotation:
-            os.makedirs(join(args.data_path, 'ellipse'), exist_ok=True)
-            ET.plotEllipsoid(ctr, rad, rot, path=join(args.data_path, 'ellipse', f'{i:06}.png'))
-        rot = Rotation.from_matrix(rot)
-        rot = rot.as_euler('XYZ')
+        ctrs.append(ctr)
+        rads.append(rad)
         rots.append(rot)
+        rot = Rotation.from_matrix(rot)
+        eul = rot.as_euler('XYZ')
+        euls.append(eul)
+    ctrs = np.stack(ctrs)
+    rads = np.stack(rads)
     rots = np.stack(rots)
-    if vis_rotation:
-        cwd = os.getcwd()
-        os.chdir(os.path.join(args.data_path))
-        subprocess.call(f"ffmpeg -y -framerate 10 -pattern_type glob -i 'ellipse/*.png' -c:v h264 ellipse.mp4", shell=True)
-        os.chdir(cwd)
+    euls = np.stack(euls)
+    os.makedirs(join(args.data_path, 'ellipse'), exist_ok=True)
+    for i in range(ctrs.shape[0]):
+        ctr = ctrs[i]
+        rad = rads[i]
+        rot = rots[i]
+        ET.plotEllipsoid(ctr, rad, rot, path=join(args.data_path, 'ellipse', f'{i:06}.png'))
+    cwd = os.getcwd()
+    os.chdir(os.path.join(args.data_path))
+    subprocess.call(f"ffmpeg -y -framerate 10 -pattern_type glob -i 'ellipse/*.png' -c:v h264 ellipse.mp4", shell=True)
+    os.chdir(cwd)
 
     fig = plt.figure(figsize=(10, 10), dpi=100)
-    plt.plot(rots[:, 0], label='X')
-    plt.plot(rots[:, 1], label='Y')    
-    plt.plot(rots[:, 2], label='Z')
+    plt.plot(euls[:, 0], label='X')
+    plt.plot(euls[:, 1], label='Y')    
+    plt.plot(euls[:, 2], label='Z')
     plt.legend()
     plt.savefig(join(args.data_path, 'euler.png'))
     plt.close(fig)
+
+    os.makedirs(join(args.data_path, 'euler_velocity'), exist_ok=True)
+    for i in range(euls.shape[0] - 1):
+        image = cv2.imread(images[i])
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        fig = plt.figure(figsize=(10, 20), dpi=100)
+        ax = fig.add_subplot(121)
+        ax.imshow(image)
+        ax.set_axis_off()
+        ax = fig.add_subplot(122)
+        ax.plot(euls[1:, 0] - euls[:-1, 0], label='VelocityX')
+        ax.plot(euls[1:, 1] - euls[:-1, 1], label='VelocityY')
+        ax.plot(euls[1:, 2] - euls[:-1, 2], label='VelocityZ')
+        ax.legend()
+        ax.axvline(x=i, color='r', linestyle='--')
+        plt.savefig(join(args.data_path, 'euler_velocity', f'{i:06}.jpg'))
+        plt.close(fig)
+    cwd = os.getcwd()
+    os.chdir(os.path.join(args.data_path))
+    subprocess.call(f"ffmpeg -y -framerate 10 -pattern_type glob -i 'euler_velocity/*.jpg' -c:v h264 euler.mp4", shell=True)
+    os.chdir(cwd)
