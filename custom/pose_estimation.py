@@ -13,6 +13,11 @@ from matplotlib import pyplot as plt
 from tqdm import tqdm
 from utils.ellipse_fit import EllipsoidTool
 from scipy.spatial.transform import Rotation
+from sklearn.cluster import KMeans, SpectralClustering
+from sklearn.mixture import GaussianMixture
+from skimage.filters import threshold_otsu
+import open3d as o3d
+
     
 def rigid_transform_3D(A, B, center_A, center_B):
     # https://github.com/nghiaho12/rigid_transform_3D/blob/843c4906fe2b22bec3b1c49f45683cb536fb054c/rigid_transform_3D.py#L10
@@ -96,7 +101,7 @@ def guess_radius(tracks: np.ndarray, visibility: np.ndarray, max_iter: int = 1, 
     radiis_mean = np.sum(valid * radiis) / np.sum(valid)
     return centers, radiis, radiis_mean
 
-def geuss_radius_improved(tracks: np.ndarray, visibility: np.ndarray):
+def geuss_radius_improved(tracks: np.ndarray, visibility: np.ndarray, tol_pixel: float = 30):
     """
     tracks: T N 2
     visibility: T N
@@ -107,7 +112,26 @@ def geuss_radius_improved(tracks: np.ndarray, visibility: np.ndarray):
     for i in tqdm(range(tracks.shape[0])):
         track = tracks[i]
         valid = valids[i]
-        center, radius = cv2.minEnclosingCircle(track[valid])
+        points = track[valid]
+        # points = np.concatenate([points, np.zeros_like(points[..., :1])], axis=-1)
+        # pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(points))
+        # pcd.remove_statistical_outlier(nb_neighbors=50, std_ratio=0.01)
+        # points = np.asarray(pcd.points)
+        # points = points[..., :2].astype('float32')
+        center, radius = cv2.minEnclosingCircle(points)
+        _center = points.mean(axis=0)
+        if np.linalg.norm(center - _center, axis=-1) > tol_pixel:
+            print(f'outlier exist in {i}-th image!!!!!')
+            dists = np.linalg.norm(points - _center[None], axis=-1)
+            # dists = (dists - dists.min()) / (dists.max() - dists.min()) * 256
+            # th = threshold_otsu(dists.reshape(-1, 1), 256)
+            _dists = np.sort(dists)
+            grad_dists = _dists[1:] - _dists[:-1] 
+            th = np.max(grad_dists)
+            index = np.where(grad_dists == th)[0]
+            dist_th = _dists[index]
+            valid = dists < dist_th
+            center, radius = cv2.minEnclosingCircle(points[valid])
         centers.append(center)
         radiis.append(radius)
     centers = np.stack(centers)
@@ -120,6 +144,26 @@ def geuss_radius_improved(tracks: np.ndarray, visibility: np.ndarray):
         arrs.append(arr)
     centers = np.stack(arrs, axis=-1)
     return centers, radiis, radiis_mean
+
+def filter_tracks(path, images, tracks, visibility):
+    os.makedirs(join(path, 'filter'), exist_ok=True)
+    valids = visibility.copy()
+    for i in tqdm(range(len(images))):
+        image = cv2.imread(images[i])
+        track = tracks[i]
+        valid = valids[i]
+        points = track[valid]
+        gmm = GaussianMixture(n_components=2).fit(points)
+        # cluster = SpectralClustering(n_clusters=2, gamma=6.0, n_jobs=8).fit(points)
+        # label = cluster.labels_
+        label = gmm.predict(points)
+        points0 = points[label == 0]
+        points1 = points[label == 1]
+        for j in range(points0.shape[0]):
+            image = cv2.circle(image, (int(points0[j][0]), int(points0[j][1])), radius=1, color=(0, 255, 0), thickness=1)
+        for j in range(points1.shape[0]):
+            image = cv2.circle(image, (int(points1[j][0]), int(points1[j][1])), radius=1, color=(0, 0, 255), thickness=1)
+        cv2.imwrite(join(path, 'filter', f'{i:06}.jpg'), image)
 
 def guess_depth(tracks: np.ndarray, centers: np.ndarray, radius: float):
     """
@@ -166,12 +210,10 @@ if __name__ == "__main__":
     parser.add_argument('--data_path', type=str)
     # geuss configs
     parser.add_argument('--radius_mode', type=str, default='improved', choices=['improved', 'original'])
-    parser.add_argument('--vis_radius', action='store_true', default=False)
     parser.add_argument('--vis_depth', action='store_true', default=False)
     parser.add_argument('--vis_points', action='store_true', default=False)
     args = parser.parse_args()
     
-    vis_radius = args.vis_radius
     vis_depth = args.vis_depth
     vis_points = args.vis_points
 
@@ -179,11 +221,23 @@ if __name__ == "__main__":
     images = sorted(glob(os.path.join(images_path, '*.jpg')))
 
     data = np.load(join(args.data_path, 'tracks.npz'))
-    tracks = data['tracks'] 
+    tracks = data['tracks']
     visibility = data['visibility']
 
     print('Estimating radius')
     if args.radius_mode == 'improved':
+        # if os.path.exists(join(args.data_path, 'mask.jpg')):
+        #     mask = cv2.imread(join(args.data_path, 'mask.jpg'))
+        #     h, w = np.where(mask[..., 0] == 0)
+        #     hmax = h.max()
+        #     hmin = h.min()
+        #     wmax = w.max()
+        #     wmin = w.min()
+        #     invalid_x = np.logical_and(tracks[0, :, 0] > wmin, tracks[0, :, 0] < wmax)
+        #     invalid_y = np.logical_and(tracks[0, :, 1] > hmin, tracks[0, :, 1] < hmax)
+        #     valid = ~np.logical_and(invalid_x, invalid_y)
+        #     tracks = tracks[:, valid]
+        #     visibility = visibility[:, valid]
         radius_scale = 1.1
         centers, radiis, radiis_mean = geuss_radius_improved(tracks, visibility)
     elif args.radius_mode == 'original':
@@ -193,21 +247,12 @@ if __name__ == "__main__":
     else:
         raise NotImplementedError
     radii = radiis_mean * radius_scale
-    if vis_radius:
-        out_dir = join(args.data_path, 'radius')
-        os.makedirs(out_dir, exist_ok=True)
-        for i in range(len(centers)):
-            img = cv2.imread(images[i])
-            img = cv2.circle(img, (int(centers[i][0]), int(centers[i][1])), radius=int(radii), color=(0, 0, 255), thickness=1)
-            cv2.imwrite(join(out_dir, os.path.basename(images[i])), img)
-        cwd = os.getcwd()
-        os.chdir(os.path.join(args.data_path))
-        subprocess.call(f"ffmpeg -y -framerate 10 -pattern_type glob -i 'radius/*.jpg' -c:v h264 radius.mp4", shell=True)
-        os.chdir(cwd)
-    
+
     print('Estimating depth')
     depth = guess_depth(tracks, centers, radii)
     points = np.concatenate([tracks, depth[..., None]], axis=-1)
+
+    print('Estimating rotation')
     Rs, ts = geuss_rotation(points, centers, visibility)
 
     if vis_points:
@@ -261,91 +306,166 @@ if __name__ == "__main__":
         cmap = mpl.colormaps['magma']
         colors = cmap(np.linspace(0, 1, points.shape[1]))
         for i in range(fuses.shape[0]):
-            # set matplot 3d
             img = cv2.imread(images[i])
             img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-            H, W, _ = img.shape
-            fig = plt.figure(figsize=(10, 10), dpi=100)
-            ax = fig.add_subplot(111, projection='3d')
+            
+            fig = plt.figure(figsize=(20, 10), dpi=100)
+            ax = fig.add_subplot(121)
+            ax.imshow(img)
+            ax.set_axis_off()
+
+            # set matplot 3d
+            ax = fig.add_subplot(122, projection='3d')
             ax.set_xlim(0, 512)
             ax.set_ylim(0, 512)
             ax.set_zlim(0, 512)
             # ax.scatter(T_points[:, 0] - H // 2, T_points[:, 1] - W // 2, T_points[:, 2], c=colors)
             ax.scatter(fuses[i, :, 0], fuses[i, :, 1], fuses[i, :, 2], c=colors)
             ax.view_init(elev=75, azim=45, roll=0)
-            fig.canvas.draw()
-            pcd = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
-            pcd = pcd.reshape(fig.canvas.get_width_height()[::-1] + (3,))
+            # fig.canvas.draw()
+            # pcd = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
+            # pcd = pcd.reshape(fig.canvas.get_width_height()[::-1] + (3,))
+            # plt.close(fig)
+            # fig = plt.figure(figsize=(10, 10), dpi=100)
+            # fig.canvas.draw()
+            # img = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
+            # img = img.reshape(fig.canvas.get_width_height()[::-1] + (3,))
+            plt.savefig(join(args.data_path, 'fuse', os.path.basename(images[i])))
             plt.close(fig)
-            fig = plt.figure(figsize=(10, 10), dpi=100)
-            ax = fig.add_subplot(111)
-            ax.imshow(img)
-            fig.canvas.draw()
-            img = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
-            img = img.reshape(fig.canvas.get_width_height()[::-1] + (3,))
-            plt.close(fig)
-            img = np.concatenate([img, pcd], axis=1)
-            img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
-            cv2.imwrite(join(args.data_path, 'fuse', os.path.basename(images[i])), img)
+            # img = np.concatenate([img, pcd], axis=1)
+            # img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
         cwd = os.getcwd()
         os.chdir(os.path.join(args.data_path))
         subprocess.call(f"ffmpeg -y -framerate 10 -pattern_type glob -i 'fuse/*.jpg' -c:v h264 fuse.mp4", shell=True)
         os.chdir(cwd)
 
-    print('Estimating ellipse')
-    ctrs = []
-    rads = []
-    rots = []
-    euls = []
-    ET = EllipsoidTool()
-    for i in tqdm(range(fuses.shape[0])):
-        ctr, rad, rot = ET.getMinVolEllipse(fuses[i], 0.01)
-        ctrs.append(ctr)
-        rads.append(rad)
-        rots.append(rot)
-        rot = Rotation.from_matrix(rot)
-        eul = rot.as_euler('XYZ')
-        euls.append(eul)
-    ctrs = np.stack(ctrs)
-    rads = np.stack(rads)
-    rots = np.stack(rots)
-    euls = np.stack(euls)
-    os.makedirs(join(args.data_path, 'ellipse'), exist_ok=True)
-    for i in range(ctrs.shape[0]):
-        ctr = ctrs[i]
-        rad = rads[i]
-        rot = rots[i]
-        ET.plotEllipsoid(ctr, rad, rot, path=join(args.data_path, 'ellipse', f'{i:06}.png'))
-    cwd = os.getcwd()
-    os.chdir(os.path.join(args.data_path))
-    subprocess.call(f"ffmpeg -y -framerate 10 -pattern_type glob -i 'ellipse/*.png' -c:v h264 ellipse.mp4", shell=True)
-    os.chdir(cwd)
+    # print('Estimating ellipse')
+    # ET = EllipsoidTool()
+    # ctr, rad, rot = ET.getMinVolEllipse(fuses[0], 0.01)
+    # ctrs = []
+    # rads = []
+    # rots = []
+        
+    # euls = []
+    # for i in tqdm(range(fuses.shape[0])):
+    #     # ctr, rad, rot = ET.getMinVolEllipse(fuses[i], 0.01)
+    #     # ctrs.append(ctr)
+    #     # rads.append(rad)
+    #     # rots.append(rot)
+    #     eul = Rotation.from_matrix(Ts[i][:3, :3] @ rot)
+    #     eul = eul.as_euler('xyz')
+    #     euls.append(eul)
+    # ctrs = np.stack(ctrs)
+    # rads = np.stack(rads)
+    # rots = np.stack(rots)
+    # euls = np.stack(euls)
+    # os.makedirs(join(args.data_path, 'ellipse'), exist_ok=True)
+    # for i in range(ctrs.shape[0]):
+    #     ctr = ctrs[i]
+    #     rad = rads[i]
+    #     rot = rots[i]
+    #     ET.plotEllipsoid(ctr, rad, rot, path=join(args.data_path, 'ellipse', f'{i:06}.png'))
+    # cwd = os.getcwd()
+    # os.chdir(os.path.join(args.data_path))
+    # subprocess.call(f"ffmpeg -y -framerate 10 -pattern_type glob -i 'ellipse/*.png' -c:v wmv2 ellipse.wmv", shell=True)
+    # os.chdir(cwd)
 
-    fig = plt.figure(figsize=(10, 10), dpi=100)
-    plt.plot(euls[:, 0], label='X')
-    plt.plot(euls[:, 1], label='Y')    
-    plt.plot(euls[:, 2], label='Z')
-    plt.legend()
-    plt.savefig(join(args.data_path, 'euler.png'))
-    plt.close(fig)
+    # fig = plt.figure(figsize=(10, 10), dpi=100)
+    # plt.plot(euls[:, 0], label='X')
+    # plt.plot(euls[:, 1], label='Y')    
+    # plt.plot(euls[:, 2], label='Z')
+    # plt.legend()
+    # plt.savefig(join(args.data_path, 'euler.png'))
+    # plt.close(fig)
 
-    os.makedirs(join(args.data_path, 'euler_velocity'), exist_ok=True)
-    for i in range(euls.shape[0] - 1):
+    # os.makedirs(join(args.data_path, 'euler_velocity'), exist_ok=True)
+    # for i in range(euls.shape[0] - 1):
+    #     image = cv2.imread(images[i])
+    #     image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    #     fig = plt.figure(figsize=(10, 10), dpi=50)
+        
+    #     ax = fig.add_subplot(221)
+    #     ax.imshow(image)
+    #     ax.set_axis_off()
+        
+    #     ax = fig.add_subplot(222)
+    #     ax.plot(np.abs(euls[1:, 0] - euls[:-1, 0]))
+    #     ax.set_title('VelocityX')
+    #     ax.axvline(x=i, color='r', linestyle='--')
+
+    #     ax = fig.add_subplot(223)
+    #     ax.plot(np.abs(euls[1:, 1] - euls[:-1, 1]))
+    #     ax.set_title('VelocityY')
+    #     ax.axvline(x=i, color='r', linestyle='--')
+
+    #     ax = fig.add_subplot(224)        
+    #     ax.plot(np.abs(euls[1:, 2] - euls[:-1, 2]))
+    #     ax.set_title('VelocityZ')
+    #     ax.axvline(x=i, color='r', linestyle='--')
+
+    #     plt.savefig(join(args.data_path, 'euler_velocity', f'{i:06}.jpg'))
+    #     plt.close(fig)
+        
+    print('Estimating angular velocity')
+    os.makedirs(join(args.data_path, 'rotation'), exist_ok=True)
+    rotations = []
+    euler_angles = []
+    rotation_axis = np.array([0, 0, 1])
+    for i in range(Rs.shape[0]):
+        rot = Rotation.from_matrix(Rs[i])
+        rotvec = rot.as_rotvec(degrees=False)
+        euler = rot.as_euler('zxy', degrees=False)
+        theta = np.linalg.norm(rotvec)
+        if rotation_axis @ rotvec > 0:
+            theta = theta
+        else:
+            theta = -theta
+        rotations.append(theta)
+        euler_angles.append(euler)
+    rotations.append(rotations[-1])
+    rotations = np.array(rotations)
+    euler_angles.append(euler_angles[-1])
+    euler_angles = np.array(euler_angles)
+
+    for i in range(len(images)):
+        fig = plt.figure(figsize=(20, 10), dpi=100)
         image = cv2.imread(images[i])
+        image = cv2.circle(image, (int(centers[i][0]), int(centers[i][1])), radius=int(radii), color=(255, 0, 0), thickness=1)
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        fig = plt.figure(figsize=(10, 20), dpi=100)
-        ax = fig.add_subplot(121)
-        ax.imshow(image)
-        ax.set_axis_off()
-        ax = fig.add_subplot(122)
-        ax.plot(euls[1:, 0] - euls[:-1, 0], label='VelocityX')
-        ax.plot(euls[1:, 1] - euls[:-1, 1], label='VelocityY')
-        ax.plot(euls[1:, 2] - euls[:-1, 2], label='VelocityZ')
-        ax.legend()
-        ax.axvline(x=i, color='r', linestyle='--')
-        plt.savefig(join(args.data_path, 'euler_velocity', f'{i:06}.jpg'))
+
+        gs = fig.add_gridspec(1, 2)
+
+        ax1 = fig.add_subplot(gs[0, 0])
+        ax1.imshow(image)
+        ax1.set_axis_off()
+
+        gssub = gs[0, 1].subgridspec(nrows=2, ncols=2, wspace=0.2)
+
+        ax2a = fig.add_subplot(gssub[0, 0])
+        ax2a.plot(rotations)
+        ax2a.axvline(x=i, color='r', linestyle='--')
+        ax2a.axhline(y=0, color='g')
+        ax2a.set_title('theta')
+
+        ax2b = fig.add_subplot(gssub[0, 1])
+        ax2b.plot(euler_angles[:, 1])
+        ax2b.axvline(x=i, color='r', linestyle='--')
+        ax2b.set_title('euler-x')
+
+        ax2c = fig.add_subplot(gssub[1, 0])
+        ax2c.plot(euler_angles[:, 2])
+        ax2c.axvline(x=i, color='r', linestyle='--')
+        ax2c.set_title('euler-y')
+
+        ax2d = fig.add_subplot(gssub[1, 1])
+        ax2d.plot(euler_angles[:, 0])
+        ax2d.axvline(x=i, color='r', linestyle='--')
+        ax2d.set_title('euler-z')
+
+        plt.savefig(join(args.data_path, 'rotation', f'{i:06}.jpg'))
         plt.close(fig)
+    
     cwd = os.getcwd()
     os.chdir(os.path.join(args.data_path))
-    subprocess.call(f"ffmpeg -y -framerate 10 -pattern_type glob -i 'euler_velocity/*.jpg' -c:v h264 euler.mp4", shell=True)
+    subprocess.call(f"ffmpeg -y -framerate 10 -pattern_type glob -i 'rotation/*.jpg' -c:v h264 rotation.mp4", shell=True)
     os.chdir(cwd)
