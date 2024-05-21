@@ -17,6 +17,7 @@ from sklearn.cluster import KMeans, SpectralClustering
 from sklearn.mixture import GaussianMixture
 from skimage.filters import threshold_otsu
 import open3d as o3d
+from utils.video import generate_video
 
     
 def rigid_transform_3D(A, B, center_A, center_B):
@@ -212,10 +213,12 @@ if __name__ == "__main__":
     parser.add_argument('--radius_mode', type=str, default='improved', choices=['improved', 'original'])
     parser.add_argument('--vis_depth', action='store_true', default=False)
     parser.add_argument('--vis_points', action='store_true', default=False)
+    parser.add_argument('--vis_traj', action='store_true', default=False)
     args = parser.parse_args()
     
     vis_depth = args.vis_depth
     vis_points = args.vis_points
+    vis_traj = args.vis_traj
 
     images_path = os.path.join(args.data_path, 'images')
     images = sorted(glob(os.path.join(images_path, '*.jpg')))
@@ -244,8 +247,7 @@ if __name__ == "__main__":
         radius_iters = 1
         radius_scale = 2.0
         centers, radiis, radiis_mean = guess_radius(tracks, visibility, max_iter=args.radius_iters, pre_fps=False)
-    else:
-        raise NotImplementedError
+    else: raise NotImplementedError
     radii = radiis_mean * radius_scale
 
     print('Estimating depth')
@@ -263,9 +265,25 @@ if __name__ == "__main__":
         for i in range(len(Rs)):
             pred_points = (Rs[i] @ points[i].T + ts[i]).T
             _ = trimesh.PointCloud(pred_points).export(join(args.data_path, 'pred_points', f'{i+1:06}.ply'))
-    
-    # os.makedirs(join(args.data_path, 'back'), exist_ok=True)
-    # os.makedirs(join(args.data_path, 'forward'), exist_ok=True)
+
+    if vis_traj:
+        os.makedirs(join(args.data_path, 'traj'), exist_ok=True)
+        traj_indices = visibility.sum(axis=0).argsort()[::-1][:5]
+        _points = points[:, traj_indices]
+        _visibility = visibility[:, traj_indices] 
+        fig = plt.figure(figsize=(10, 10), dpi=100)
+        ax = fig.add_subplot(111, projection='3d')
+        for i in range(len(traj_indices)):
+            _point = _points[:, i]
+            _vis = _visibility[:, i]
+            ax.plot(_point[:, 0], _point[:, 1], _point[:, 2], marker='*')
+        ax.set_xlabel('X')
+        ax.set_ylabel('Y')
+        ax.set_zlabel('Z')
+        ax.set_title('3D Trajectory')
+        plt.savefig(join(args.data_path, 'traj', f'traj.jpg'))
+        plt.close(fig)
+
     Ts = [np.eye(4)]
     for i in range(len(Rs)):
         T = np.eye(4)
@@ -275,33 +293,31 @@ if __name__ == "__main__":
         Ts.append(T)
     Ts = np.stack(Ts)
     
-    fuses = []
-    for i in range(points.shape[0]):
-        homo = np.ones_like(points[..., :1])
-        homo_points = np.concatenate([points, homo], axis=-1)
-        bwd_Ts = np.linalg.inv(Ts)
-        fwd_T = Ts[i][None]
-        T = fwd_T @ bwd_Ts
-        T_points = (T @ homo_points.transpose(0, 2, 1)).transpose(0, 2, 1)[..., :3]
-        T_points = T_points.mean(0)
-        fuses.append(T_points)
-        if vis_points:
-            _ = trimesh.PointCloud(T_points).export(join(args.data_path, 'fuse', f'{i:06}.ply'))
-
-        # homo = np.ones_like(points[0][..., :1])
-        # homo_points = np.concatenate([points[0], homo], axis=-1)
-        # forward = (T @ homo_points.T).T[..., :3]
-        # _ = trimesh.PointCloud(forward).export(join(args.data_path, 'forward', f'{i+1:06}.ply'))
-
-        # homo = np.ones_like(points[i+1][..., :1])
-        # homo_points = np.concatenate([points[i+1], homo], axis=-1)
-        # # back = (np.linalg.inv(T) @ homo_points.T).T[..., :3]
-        # back = (np.eye(4) @ homo_points.T).T[..., :3]
-        # _ = trimesh.PointCloud(back).export(join(args.data_path, 'back', f'{i+1:06}.ply'))
-        # backs.append(back)
-    fuses = np.stack(fuses)
-    
     if vis_depth:
+        fuses = []
+        for i in range(points.shape[0]):
+            homo = np.ones_like(points[..., :1])
+            homo_points = np.concatenate([points, homo], axis=-1)
+            bwd_Ts = np.linalg.inv(Ts)
+            fwd_T = Ts[i][None]
+            T = fwd_T @ bwd_Ts
+            T_points = (T @ homo_points.transpose(0, 2, 1)).transpose(0, 2, 1)[..., :3]
+            T_points = T_points.mean(0)
+            fuses.append(T_points)
+
+            # homo = np.ones_like(points[0][..., :1])
+            # homo_points = np.concatenate([points[0], homo], axis=-1)
+            # forward = (T @ homo_points.T).T[..., :3]
+            # _ = trimesh.PointCloud(forward).export(join(args.data_path, 'forward', f'{i+1:06}.ply'))
+
+            # homo = np.ones_like(points[i+1][..., :1])
+            # homo_points = np.concatenate([points[i+1], homo], axis=-1)
+            # # back = (np.linalg.inv(T) @ homo_points.T).T[..., :3]
+            # back = (np.eye(4) @ homo_points.T).T[..., :3]
+            # _ = trimesh.PointCloud(back).export(join(args.data_path, 'back', f'{i+1:06}.ply'))
+            # backs.append(back)
+
+        fuses = np.stack(fuses)
         os.makedirs(join(args.data_path, 'fuse'), exist_ok=True)
         cmap = mpl.colormaps['magma']
         colors = cmap(np.linspace(0, 1, points.shape[1]))
@@ -334,9 +350,10 @@ if __name__ == "__main__":
             plt.close(fig)
             # img = np.concatenate([img, pcd], axis=1)
             # img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+
         cwd = os.getcwd()
         os.chdir(os.path.join(args.data_path))
-        subprocess.call(f"ffmpeg -y -framerate 10 -pattern_type glob -i 'fuse/*.jpg' -c:v h264 fuse.mp4", shell=True)
+        subprocess.call(f"ffmpeg -y -framerate 10 -pattern_type glob -i 'fuse/*.jpg' -c:v libxh264 -pix_fmt yuv420p fuse.mp4", shell=True)
         os.chdir(cwd)
 
     # print('Estimating ellipse')
@@ -467,5 +484,5 @@ if __name__ == "__main__":
     
     cwd = os.getcwd()
     os.chdir(os.path.join(args.data_path))
-    subprocess.call(f"ffmpeg -y -framerate 10 -pattern_type glob -i 'rotation/*.jpg' -c:v h264 rotation.mp4", shell=True)
+    subprocess.call(f"ffmpeg -y -framerate 10 -pattern_type glob -i 'rotation/*.jpg' -c:v libxh264 -pix_fmt yuv420p rotation.mp4", shell=True)
     os.chdir(cwd)
