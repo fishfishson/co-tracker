@@ -35,7 +35,7 @@ def main(args):
 
         ret = tp.locate(img, args.diameter, minmass=args.minmass, invert=False)
         cx, cy = np.array(ret['x']), np.array(ret['y'])
-        out = {'cx': cx, 'cy': cy, 'size': np.array(ret['size']), 'ecc': np.array(ret['ecc'])}
+        out = {'cx': cx, 'cy': cy, 'size': np.array(ret['size']), 'ecc': np.array(ret['ecc']), 'mass': np.array(ret['mass'])}
         np.savez_compressed(os.path.join(args.data_path, 'locate', f'{i:06}.npz'), **out)
         for ii in range(len(cx)):
             vis_locate = cv2.circle(vis, (int(cx[ii]), int(cy[ii])), 8, (0, 0, 255), 2)
@@ -50,8 +50,8 @@ def main(args):
         #     grp.create_dataset('keypoints', data=np.array([cx, cy]).reshape(-1, 2))
             
     os.chdir(os.path.join(args.data_path))
-    subprocess.call("ffmpeg -y -framerate 30 -pattern_type glob -i 'images/*.jpg' -c:v copy images.mp4", shell=True)
-    subprocess.call("ffmpeg -y -framerate 30 -pattern_type glob -i 'locate/*.jpg' -c:v copy locate.mp4", shell=True)
+    subprocess.call(f"ffmpeg -y -framerate 30 -pattern_type glob -i 'images/*.jpg' -c:v copy {args.vid_name}", shell=True)
+    subprocess.call(f"ffmpeg -y -framerate 30 -pattern_type glob -i 'locate/*.jpg' -c:v copy {args.out_name}", shell=True)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -59,6 +59,8 @@ if __name__ == "__main__":
 
     # vis
     parser.add_argument('--scale', type=int, default=2)
+    parser.add_argument('--vid_name', type=str, default='images.mp4')
+    parser.add_argument('--out_name', type=str, default='locate.mp4')
 
     # location
     parser.add_argument('--diameter', type=int, default=11)

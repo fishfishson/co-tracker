@@ -4,7 +4,7 @@ import numpy as np
 import cv2
 from tqdm import tqdm
 from matplotlib import pyplot as plt
-from matplotlib import cm
+import matplotlib as mpl
 from glob import glob
 import shutil
 import pandas as pd
@@ -29,8 +29,8 @@ def discrete_cmap(N, base_cmap=None):
 
 def main(args):
     device = "cuda:0"
-    # cotracker = torch.hub.load("facebookresearch/co-tracker", "cotracker2").to(device)
-    model = CoTrackerPredictor(checkpoint="../checkpoints/cotracker2.pth").to(device)
+    model = torch.hub.load("facebookresearch/co-tracker", "cotracker2").to(device)
+    # model = CoTrackerPredictor(checkpoint="../checkpoints/cotracker2.pth").to(device)
 
     images_path = os.path.join(args.data_path, 'images')
     images = glob(os.path.join(images_path, '*.jpg'))
@@ -42,9 +42,9 @@ def main(args):
 
     video = []
     max_len = len(images)
-    start_time = args.start_time
-    duratoin = args.duration
-    end_time = min(max_len, start_time + duratoin)
+    start_time = max(0, args.start_time)
+    if args.end_time is None: end_time = max_len
+    else: end_time = min(max_len, args.end_time) 
     duratoin = end_time - start_time
     for image in images[start_time:end_time]:
         img = cv2.imread(image)
@@ -82,6 +82,7 @@ def main(args):
     # pred_visibility = gt_visibility[None]
 
     queries = []
+    masses = []
     if args.mode == 'only_first':
         for idx, locate in enumerate(locates[start_time:start_time+1]):
             loc = np.load(locate)
@@ -91,9 +92,10 @@ def main(args):
     elif args.mode == 'full':
         for idx, locate in enumerate(locates[start_time:end_time]):
             loc = np.load(locate)
-            cx, cy = loc['cx'], loc['cy']
+            cx, cy, mass = loc['cx'], loc['cy'], loc['mass']
             time = np.ones_like(cx) * idx
             queries.append(np.stack([time, cx, cy], axis=1))
+            masses.append(mass)
     queries = np.concatenate(queries, axis=0)
     queries = torch.from_numpy(queries).float().to(device)
     with torch.no_grad():
@@ -105,7 +107,8 @@ def main(args):
     valid = count > count_thresh
     pred_tracks = pred_tracks[:, valid]
     pred_visibility = pred_visibility[:, valid]
-    np.savez_compressed(os.path.join(args.data_path, 'tracks.npz'), tracks=pred_tracks, visibility=pred_visibility)
+    masses = np.concatenate(masses, axis=0)[valid]
+    np.savez_compressed(os.path.join(args.data_path, 'tracks.npz'), tracks=pred_tracks, visibility=pred_visibility, masses=masses)
     
     os.makedirs(os.path.join(args.data_path, 'sparse'), exist_ok=True)
     image_names = [x for x in images[start_time:end_time]]
@@ -150,7 +153,7 @@ def main(args):
     
     N = pred_visibility.shape[1]
     # cmap = discrete_cmap(N)
-    cmap = cm.get_cmap('gist_rainbow')
+    cmap = mpl.colormaps['gist_rainbow']
     # indices = torch.randperm(N)
     # pred_tracks = pred_tracks[:, indices]
     # pred_visibility = pred_visibility[:, indices]
@@ -189,7 +192,7 @@ if __name__ == "__main__":
     parser.add_argument('--mannual_path', type=str, default='2d.pkl')
     # track
     parser.add_argument('--start_time', type=int, default=0)
-    parser.add_argument('--duration', type=int, default=100)
+    parser.add_argument('--end_time', type=int, default=None)
     parser.add_argument('--mode', type=str, default='full', choices=['full', 'only_first'])
     parser.add_argument('--vis_threshold', type=float, default=0.75)
 
