@@ -52,13 +52,27 @@ $DATAROOT/Blebb/Cell 12
 # marker detetion
 python3 detection.py --data_path $DATAROOT/DMSO/Cell2/After\ DMSO
 ```
-5. (Optional) run segmentaiton
-   After detection, you will get *images.mp4*. Use [sem-and-track](https://github.com/fishfishson/Segment-and-Track-Anything) to segment it. Put the segmentation results into dir *images_masks*:
+5. run segmentaiton
+   <!-- After detection, you will get *images.mp4*. Use [sem-and-track](https://github.com/fishfishson/Segment-and-Track-Anything) to segment it. Put the segmentation results into dir *images_masks*: -->
+   1. install *samurai*
+   ```shell
+   cd samurai/sam2
+   python3 setup.py develop
+   ./checkpoints/download_ckpts.sh
+   ```
+   2. run segmentation
+   ```shell
+   cd samurai
+   python3 scripts/demo.py --video_path ./data/cellnottrackeasy/Cell\ 3/After\ drug/images --txt_path ./data/cellnottrackeasy/Cell\ 3/After\ drug/bbox.txt
+   ```
    ```shell
    ├── After drug
-   │   ├── images_masks
-   |   |    ├── 0000.png
-   |   |    ├── 0001.png
+   |   ├── seg_vis
+   |   |    ├── 0000.jpg
+   |   |    ├── 0001.jpg
+   │   ├── seg
+   |   |    ├── 0000.jpg
+   |   |    ├── 0001.jpg
     ```
 6. run tracking and pose estimation
 ```shell
